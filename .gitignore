@@ -1,0 +1,40 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python backend
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Node (LibreChat submodule has its own, but just in case)
+node_modules/
+.next/
+.nuxt/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Uploads (resume PDFs should never be committed)
+uploads/
+*.pdf
+
+# FAISS index (in-memory, no need to commit)
+*.faiss
+*.index
+
+# Logs
+*.log
+logs/
