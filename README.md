@@ -54,8 +54,8 @@ All sources are chunked, embedded, and queried together. Answers cite which sour
 | **Backend** | FastAPI (Python) |
 | **PDF parsing** | PyMuPDF |
 | **Embeddings** | Sentence Transformers (local) |
-| **Vector store** | In-memory (FAISS) |
-| **LLM** | Ollama (Mistral 7B, runs locally) |
+| **Vector store** | pgvector (PostgreSQL) |
+| **LLM** | Groq (cloud) or HuggingFace Inference API |
 | **Orchestration** | Strands Agents |
 
 ---
@@ -68,9 +68,9 @@ Recruiter uploads PDF
         ▼
 FastAPI /upload endpoint
   ├── PyMuPDF extracts text
-  ├── Text is chunked (500 tokens, 50 token overlap)
+  ├── Text is chunked (500 chars, 50 char overlap)
   ├── Chunks embedded via Sentence Transformers
-  └── Stored in FAISS in-memory vector store
+  └── Stored in pgvector (PostgreSQL)
         │
         ▼
 Recruiter asks a question (via LibreChat)
@@ -78,8 +78,8 @@ Recruiter asks a question (via LibreChat)
         ▼
 FastAPI /chat endpoint
   ├── Question embedded
-  ├── Top-k chunks retrieved from FAISS
-  ├── Chunks + question sent to Ollama (Mistral 7B)
+  ├── Top-k chunks retrieved from pgvector
+  ├── Chunks + question sent to Groq or HuggingFace
   └── Grounded answer returned
         │
         ▼
@@ -93,34 +93,33 @@ Recruiter reads answer
 ### Prerequisites
 
 - Docker
-- [Ollama](https://ollama.ai) installed on your Mac
 - Python 3.11+
 - Node.js 20+
+- A [Groq API key](https://console.groq.com) — free, no credit card required (key starts with `gsk_`)
+- A [HuggingFace token](https://huggingface.co/settings/tokens) — free account works (token starts with `hf_`)
 
-### 1. Pull the local model
+### 1. Add your API keys
 
-```bash
-ollama pull mistral
+Create `backend/.env`:
+
+```
+GROQ_API_KEY=gsk_your_key_here
+HF_TOKEN=hf_your_token_here
 ```
 
-### 2. Clone and start LibreChat
+### 2. Clone and start LibreChat + vectordb
 
 ```bash
-git clone https://github.com/danny-avila/LibreChat.git
-cd LibreChat
-cp .env.example .env
-# Edit .env — point LLM endpoint to your FastAPI backend
-docker compose up
+cd ~/talktomyresume/librechat
+docker compose up -d
 ```
 
 ### 3. Start the FastAPI backend
 
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate
+cd ~/talktomyresume/backend
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --port 8080
 ```
 
 ### 4. Open the app
@@ -133,46 +132,112 @@ Upload a PDF resume and start asking questions.
 
 ---
 
+## Quick Test — Groq
+
+Want to verify everything is working end to end? Follow these steps after completing Local Setup above.
+
+**1. Upload a resume:**
+```bash
+curl -X POST http://localhost:8080/upload \
+  -F "file=@/path/to/your/resume.pdf"
+```
+
+Expected response:
+```json
+{"chunks_stored": 13}
+```
+
+**2. Ask a question:**
+```bash
+curl -X POST http://localhost:8080/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is this candidates most recent job?", "provider": "groq"}'
+```
+
+Expected response:
+```json
+{"answer": "Their most recent role is..."}
+```
+
+---
+
+## Quick Test — HuggingFace
+
+Same steps, just swap the provider:
+
+```bash
+curl -X POST http://localhost:8080/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What programming languages does this candidate know?", "provider": "huggingface"}'
+```
+
+> ⚠️ See Known Issues below — HuggingFace is currently returning 401 errors.
+
+---
+
 ## Project Structure
 
 ```
 talk-to-my-resume/
 ├── backend/
-│   ├── main.py           # FastAPI app — /upload and /chat endpoints
-│   ├── parser.py         # PDF text extraction (PyMuPDF)
-│   ├── chunker.py        # Text chunking with overlap
-│   ├── embedder.py       # Sentence Transformers embeddings
-│   ├── store.py          # FAISS in-memory vector store
-│   ├── agent.py          # Strands agent — tool orchestration
-│   └── requirements.txt
-├── LibreChat/            # Cloned and customized chat frontend
+│   ├── main.py           # FastAPI app — /upload, /chat, /v1/chat/completions
+│   ├── requirements.txt
+│   ├── .env              # GROQ_API_KEY and HF_TOKEN (not committed)
+│   └── tests/
+│       └── test_api.py   # pytest test suite
+├── librechat/
+│   ├── docker-compose.yml
+│   └── librechat.yaml    # Endpoint config — Groq + Resume RAG
 └── README.md
+```
+
+---
+
+## Run Tests
+
+```bash
+cd ~/talktomyresume/backend
+pytest tests/test_api.py -v
 ```
 
 ---
 
 ## Design Decisions
 
-**Why in-memory vector store?**
-For MVP, sessions are ephemeral — nothing is stored when the tab closes. FAISS in-memory is fast, requires no infrastructure, and keeps candidate data private by design.
+**Why pgvector instead of FAISS in-memory?**
+pgvector persists embeddings across server restarts and sessions. Resumes uploaded once stay queryable without re-uploading. For a truly ephemeral session, swap back to FAISS.
 
-**Why Ollama + Mistral locally?**
-Zero API costs during development. When ready to deploy, swap `ollama` for Bedrock (Claude Haiku) or HuggingFace Inference API with a one-line config change.
+**Why Groq?**
+Fast inference, generous free tier, no local GPU required. The Qwen models available on Groq perform well for Q&A against short context windows like resume chunks.
 
 **Why LibreChat?**
 Battle-tested chat UI with file upload support, streaming responses, and conversation history — without building a frontend from scratch.
 
 **Why FastAPI?**
-Python-native, fits naturally with PyMuPDF, FAISS, and Sentence Transformers. Same language as the ML toolchain.
+Python-native, fits naturally with Sentence Transformers and pgvector. Same language as the ML toolchain.
 
 ---
 
 ## Privacy
 
-- Resumes are never written to disk or a database
-- All processing happens in memory for the duration of the session
-- Closing the browser tab clears all session data
-- No candidate data is shared with third-party services (all inference runs locally via Ollama)
+- Resumes are chunked and stored in a local PostgreSQL database (not sent to any third party)
+- Questions and context are sent to Groq or HuggingFace for inference only
+- No candidate data is logged or retained by the LLM providers beyond their standard API terms
+
+---
+
+## Known Issues
+
+### HuggingFace — 401 Unauthorized
+
+The HuggingFace provider is wired up in `main.py` but currently returns a 401 error when calling the Inference API. The token loads correctly from `.env` (verified via the `/whoami` endpoint), but authentication is still failing.
+
+To reproduce:
+```bash
+curl -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/api/whoami
+```
+
+**Workaround:** Use `"provider": "groq"` in all `/chat` requests until this is resolved.
 
 ---
 
@@ -181,8 +246,8 @@ Python-native, fits naturally with PyMuPDF, FAISS, and Sentence Transformers. Sa
 - [ ] Additional sources — LinkedIn, GitHub, portfolio URLs scraped and embedded alongside the resume
 - [ ] Multi-resume upload — screen several candidates side by side
 - [ ] Fit scoring — score a candidate against a job description
-- [ ] Pinecone persistence — optional session save for returning recruiters
-- [ ] Bedrock / Claude Haiku — swap Ollama for cloud inference on deploy
+- [ ] Fix HuggingFace 401 — enable provider toggle in production
+- [ ] Bedrock / Claude Haiku — swap Groq for cloud inference on deploy
 - [ ] Fine-tuned ResumeDecider — small classifier for fast yes/no skill questions
 
 ---
